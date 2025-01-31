@@ -32,10 +32,12 @@ string GetPasswordText() {
 }
 
 // 全局变量
+string DEFAULT_MODEL_NAME = "wangshenzhi/gemma2-9b-chinese-chat:latest";
 string api_key = "";
-string selected_model = "wangshenzhi/gemma2-9b-chinese-chat:latest"; // 默认使用第一个模型
+string selected_model = DEFAULT_MODEL_NAME; // 默认使用第一个模型
 string UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)";
 string api_url = "http://127.0.0.1:11434/v1/chat/completions"; // 新增本地API地址
+string api_url_base = "http://127.0.0.1:11434";
 string context = "";
 
 // 支持的语言列表
@@ -70,17 +72,31 @@ string ServerLogin(string User, string Pass) {
 
     selected_model.MakeLower();
 
+    array<string> names = GetOllamaModelNames();
+
     // 验证模型名称是否为空或是否为支持的模型
     if (selected_model.empty()) {
         HostPrintUTF8("{$CP949=모델 이름이 입력되지 않았습니다. 유효한 모델 이름을 입력하십시오.$}{$CP950=模型名稱未輸入，請輸入有效的模型名稱。$}{$CP0=Model name not entered. Please enter a valid model name.$}\n");
-        selected_model = "wangshenzhi/gemma2-9b-chinese-chat:latest"; // 使用默认模型
-    } else if (selected_model != "wangshenzhi/gemma2-9b-chinese-chat:latest" && 
-               selected_model != "isotr0py/sakura-13b-qwen2beta-v0.10pre0-q6_k:latest") {
-        HostPrintUTF8("{$CP949=지원되지 않는 모델입니다. 지원되는 모델을 입력하십시오.$}{$CP950=不支援的模   ，   輸入支援的模型。$}{$CP0=Unsupported model. Please enter a supported model.$}\n");
-        return "fail";
+        selected_model = DEFAULT_MODEL_NAME; // 使用默认模型
     }
 
-    // 保存设置到临时存储，添加 ollama_ 前缀避免冲突
+    int modelscount = names.size();
+    if (modelscount == 0){
+        return "Ollama未返回有效的模型名称数据，请确认Ollama是否已运行或已有下载的模型。Ollama did not return valid model name data. Please confirm whether Ollama is running or has any downloaded models.";
+    }
+    bool matched = false;
+    for (int i = 0; i < modelscount; i++){
+        if (selected_model == names[i]){
+            matched = true;
+            break;
+        }
+    }
+    if (!matched){
+        HostPrintUTF8("{$CP949=지원되지 않는 모델입니다. 지원되는 모델을 입력하십시오.$}{$CP950=不支援的模   ，   輸入支援的模型。$}{$CP0=Unsupported model. Please enter a supported model.$}\n");
+        return "未从Ollama中找到模型：" + selected_model;
+    }
+
+    // 保存设置到临时存储
     HostSaveString("api_key_ollama", api_key);
     HostSaveString("selected_model_ollama", selected_model);
 
@@ -91,7 +107,7 @@ string ServerLogin(string User, string Pass) {
 // 登出接口，清除模型名称和 API Key
 void ServerLogout() {
     api_key = "";
-    selected_model = "wangshenzhi/gemma2-9b-chinese-chat:latest"; // 重置为默认模型
+    selected_model = DEFAULT_MODEL_NAME; // 重置为默认模型
     HostSaveString("api_key_ollama", "");
     HostSaveString("selected_model_ollama", selected_model);
     HostPrintUTF8("{$CP949=성공적으로 로그아웃되었습니다.$}{$CP950=已成功登出。$}{$CP0=Successfully logged out.$}\n");
@@ -110,7 +126,7 @@ string JsonEscape(const string &in input) {
 
 // 翻译函数
 string Translate(string Text, string &in SrcLang, string &in DstLang) {
-    // 从临时存储中加载模型名称，使用新的键名
+    // 从临时存储中加载模型名称
     selected_model = HostLoadString("selected_model_ollama", "wangshenzhi/gemma2-9b-chinese-chat:latest");
 
     if (DstLang.empty() || DstLang == "{$CP949=자동 감지$}{$CP950=自動檢測$}{$CP0=Auto Detect$}") {
@@ -190,4 +206,25 @@ void OnInitialize() {
 // 插件结束
 void OnFinalize() {
     HostPrintUTF8("{$CP949=ollama 번역 플러그인이 언로드되었습니다.$}{$CP950=ollama 翻譯插件已卸載。$}{$CP0=ollama translation plugin unloaded.$}\n");
+}
+
+array<string> GetOllamaModelNames(){
+    string url = api_url_base + "/api/tags";
+    string headers = "Content-Type: application/json";
+    string resp = HostUrlGetString(url,UserAgent, headers, "");
+    JsonReader reader;
+    JsonValue root;
+    if (!reader.parse(resp, root)){
+        HostPrintUTF8("{$CP0=Failed to parse the list of the deployed models from Ollama.$}{$CP936=解析Ollama本地部署模型名称列表时失败：无法解析json。}");
+        array<string> empty;
+        return empty;
+    }
+    JsonValue models = root["models"];
+    int count = models.size();
+    int i = 0;
+    array<string> res;
+    for (i=0 ; i<count;i++){
+        res.insertLast(models[i]["name"].asString());
+    }
+    return res;
 }
