@@ -1,4 +1,4 @@
-<br>更新了V3英译中版本，直接releases下载压缩包即可。解决了和Felix3322作者插件之间的矛盾
+<br>更新了V3英译中版本，直接releases下载压缩包即可。解决了和Felix3322作者插件之间的变量名冲突
 <br>更新了V2英译中版本，直接releases下载压缩包即可。优化了提示词，联系上下文
 <br>参考
 <br>https://github.com/Felix3322/PotPlayer_Chatgpt_Translate
