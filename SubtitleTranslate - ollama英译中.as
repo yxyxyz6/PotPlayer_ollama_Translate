@@ -124,9 +124,8 @@ string JsonEscape(const string &in input) {
     return output;
 }
 
-// 翻译函数
+// 翻译函数（加入对 <think> 标签的处理）
 string Translate(string Text, string &in SrcLang, string &in DstLang) {
-    // 从临时存储中加载模型名称
     selected_model = HostLoadString("selected_model_ollama", "wangshenzhi/gemma2-9b-chinese-chat:latest");
 
     if (DstLang.empty() || DstLang == "{$CP949=자동 감지$}{$CP950=自動檢測$}{$CP0=Auto Detect$}") {
@@ -140,8 +139,8 @@ string Translate(string Text, string &in SrcLang, string &in DstLang) {
         SrcLang = "";
     }
 
-    // 构建提示词
-    string prompt = "你是一名专业翻译。请将以下字幕文本翻译";
+    // ===== 构建提示词 =====
+    string prompt = "/no_think 你是一名专业翻译。请将以下字幕文本翻译";  // 开头加 /no_think
     if (!SrcLang.empty()) {
         prompt += "从" + SrcLang;
     }
@@ -155,21 +154,17 @@ string Translate(string Text, string &in SrcLang, string &in DstLang) {
     }
     prompt += "待翻译文本：\n'''\n" + Text + "\n'''";
 
-    // JSON 转义
     string escapedPrompt = JsonEscape(prompt);
 
-    // 构建请求数据
     string requestData = "{\"model\":\"" + selected_model + "\",\"messages\":[{\"role\":\"user\",\"content\":\"" + escapedPrompt + "\"}]}";
     string headers = "Content-Type: application/json";
 
-    // 发送请求
     string response = HostUrlGetString(api_url, UserAgent, headers, requestData);
     if (response.empty()) {
         HostPrintUTF8("{$CP949=번역 요청이 실패했습니다.$}{$CP950=翻譯請求失敗。$}{$CP0=Translation request failed.$}\n");
         return "";
     }
 
-    // 解析响应
     JsonReader Reader;
     JsonValue Root;
     if (!Reader.parse(response, Root)) {
@@ -180,6 +175,26 @@ string Translate(string Text, string &in SrcLang, string &in DstLang) {
     JsonValue choices = Root["choices"];
     if (choices.isArray() && choices[0]["message"]["content"].isString()) {
         string translatedText = choices[0]["message"]["content"].asString();
+
+        uint thinkStart = translatedText.find("<think>");
+        uint thinkEnd = translatedText.find("</think>");
+
+        while (thinkStart < translatedText.length() && thinkEnd < translatedText.length() && thinkEnd > thinkStart) {
+            // 删除 <think>...</think> 及其后的连续换行
+            uint endPos = thinkEnd + 8; // "</think>".length = 8
+            while (endPos < translatedText.length() && (translatedText.substr(endPos,1) == "\n" || translatedText.substr(endPos,1) == "\r")) {
+                endPos++;
+            }
+
+            string beforeThink = translatedText.substr(0, thinkStart);
+            string afterThink = translatedText.substr(endPos, translatedText.length() - endPos);
+            translatedText = beforeThink + afterThink;
+
+            thinkStart = translatedText.find("<think>");
+            thinkEnd = translatedText.find("</think>");
+        }
+
+
         if (DstLang == "fa" || DstLang == "ar" || DstLang == "he") {
             translatedText = UNICODE_RLE + translatedText;
         }
