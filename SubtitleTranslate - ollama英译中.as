@@ -73,8 +73,6 @@ string ServerLogin(string User, string Pass) {
     selected_model = User.Trim();
     api_key = Pass.Trim();
 
-    selected_model.MakeLower();
-
     array<string> names = GetOllamaModelNames();
 
     // 验证模型名称是否为空或是否为支持的模型
@@ -88,9 +86,22 @@ string ServerLogin(string User, string Pass) {
         return "Ollama未返回模型数据，请确认Ollama已运行 (http://127.0.0.1:11434) 且已下载模型。";
     }
     bool matched = false;
+
+    // 创建一个用户输入的小写副本用于比较
+    string user_input_lower = selected_model;
+    user_input_lower.MakeLower();
+
     for (int i = 0; i < modelscount; i++){
-        if (selected_model == names[i]){
+        // 创建一个列表中模型名称的小写副本用于比较
+        string current_model_name = names[i];
+        string current_model_lower = current_model_name;
+        current_model_lower.MakeLower();
+
+        // 进行不区分大小写的比较
+        if (user_input_lower == current_model_lower){
             matched = true;
+            // 将 selected_model 更新为列表中准确的大小写名称，确保 API 调用正确
+            selected_model = current_model_name; 
             break;
         }
     }
