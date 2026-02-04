@@ -68,6 +68,7 @@
 
 本项目默认配置使用的并强烈推荐的 Ollama 翻译模型为：
 > **`huihui_ai/hy-mt1.5-abliterated:latest`**
+> <br>
 > ollama下载指令：ollama run huihui_ai/hy-mt1.5-abliterated
 
 如果你需要更改为其他模型：
