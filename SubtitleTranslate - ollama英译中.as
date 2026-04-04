@@ -1,46 +1,49 @@
 /*
     Real-time subtitle translation for PotPlayer using ollama API
-    Optimized for huihui_ai/hy-mt1.5-abliterated
-    (Simplified Chinese Localization + Enhanced Subtitle Prompt)
 */
 
 // 插件信息函数
 string GetTitle() {
-    return "{$CP936=本地 AI 翻译}{$CP0=Local AI Translation$}";
+    return "Local AI Translation";
 }
 
 string GetVersion() {
-    return "1.8"; // 版本号升级，标记提示词更新
+    return "2.0";
 }
 
 string GetDesc() {
-    return "{$CP936=使用本地 AI 的实时字幕翻译}{$CP0=Real-time subtitle translation using Local AI$}";
+    return "Real-time subtitle translation using Local AI";
 }
 
 string GetLoginTitle() {
-    return "{$CP936=本地 AI 模型配置}{$CP0=Local AI Model Configuration$}";
+    return "Local AI Model Configuration";
 }
 
 string GetLoginDesc() {
-    return "{$CP936=请输入模型名称（例如 huihui_ai/hy-mt1.5-abliterated:latest）。}{$CP0=Please enter the model name (e.g., huihui_ai/hy-mt1.5-abliterated:latest).$}";
+    return "Please enter the model name and api key.";
 }
 
 string GetUserText() {
-    return "{$CP936=模型名称 (当前: " + selected_model + ")}{$CP0=Model Name (Current: " + selected_model + ")$}";
+    return "Model Name: " + selected_model;
 }
 
 string GetPasswordText() {
-    return "{$CP936=API 密钥:}{$CP0=API Key:$}";
+    return "API Key: " + api_key;
 }
 
 // 全局变量
 string DEFAULT_MODEL_NAME = "huihui_ai/hy-mt1.5-abliterated:latest"; 
 string api_key = "";
 string selected_model = DEFAULT_MODEL_NAME; 
+string selected_temperature = "0.0";
 string UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)";
-string api_url = "http://127.0.0.1:11434/v1/chat/completions";
 string api_url_base = "http://127.0.0.1:11434";
-string context = "";
+string api_url_chat = api_url_base + "/api/chat"; 
+string api_url_tags = api_url_base + "/api/tags";
+
+// 上下文滑动窗口配置，保留最近 5 句台词作为上下文
+array<string> HistoryQueue;
+int MAX_HISTORY_LINES = 5; // 
 
 // 支持的语言列表
 array<string> LangTable = 
@@ -67,20 +70,16 @@ array<string> GetDstLangs() {
     return ret;
 }
 
-// 登录接口，用于输入模型名称和 API Key
+// 登录接口
 string ServerLogin(string User, string Pass) {
-    // 去除首尾空格
     selected_model = User.Trim();
     api_key = Pass.Trim();
-
     selected_model.MakeLower();
 
     array<string> names = GetOllamaModelNames();
 
-    // 验证模型名称是否为空或是否为支持的模型
     if (selected_model.empty()) {
-        HostPrintUTF8("{$CP936=未输入模型名称，请输入有效的模型名称。}{$CP0=Model name not entered. Please enter a valid model name.$}\n");
-        selected_model = DEFAULT_MODEL_NAME; // 使用默认模型
+        selected_model = DEFAULT_MODEL_NAME; 
     }
 
     int modelscount = names.size();
@@ -95,25 +94,20 @@ string ServerLogin(string User, string Pass) {
         }
     }
     if (!matched){
-        HostPrintUTF8("{$CP936=不支持的模型，请输入已下载的模型名称。}{$CP0=Unsupported model. Please enter a supported model.$}\n");
-        return "本地Ollama未找到模型：" + selected_model;
+        return "本地Ollama未找到模型: " + selected_model;
     }
 
-    // 保存设置到临时存储
     HostSaveString("api_key_ollama", api_key);
     HostSaveString("selected_model_ollama", selected_model);
-    HostPrintUTF8("{$CP936=API 密钥与模型名称已成功配置。}{$CP0=API Key and model name successfully configured.$}\n");
     return "200 ok";
 }
 
-// 登出接口，清除模型名称和 API Key
+// 登出接口
 void ServerLogout() {
     api_key = "";
     selected_model = DEFAULT_MODEL_NAME;
-    // 重置为默认模型
     HostSaveString("api_key_ollama", "");
     HostSaveString("selected_model_ollama", selected_model);
-    HostPrintUTF8("{$CP936=已成功退出。}{$CP0=Successfully logged out.$}\n");
 }
 
 // JSON 字符串转义函数
@@ -130,73 +124,77 @@ string JsonEscape(const string &in input) {
 // 翻译函数
 string Translate(string Text, string &in SrcLang, string &in DstLang) {
     selected_model = HostLoadString("selected_model_ollama", DEFAULT_MODEL_NAME);
-
-    // 检查目标语言
-    if (DstLang.empty() || DstLang == "{$CP936=自动检测}{$CP0=Auto Detect$}") {
-        HostPrintUTF8("{$CP936=目标语言未指定。}{$CP0=Target language not specified.$}\n");
-        return "";
+    if (DstLang.empty() || DstLang == "Auto") {
+        return "目标语言需明确指定";
     }
 
     string UNICODE_RLE = "\u202B";
-    if (SrcLang.empty() || SrcLang == "{$CP936=自动检测}{$CP0=Auto Detect$}") {
-        SrcLang = "";
+    string sourceLangText = "";
+    if (!SrcLang.empty() && SrcLang != "Auto") {
+        sourceLangText = "从" + SrcLang;
     }
 
-    // --- 构建提示词（集成用户优化的逻辑） ---
-    // 强制模型角色：字幕翻译引擎
-    string prompt = "你是一个字幕翻译引擎，只负责逐条翻译字幕文本。\n";
-
-    if (!SrcLang.empty()) {
-        prompt += "请将以下字幕从" + SrcLang + "翻译为" + DstLang + "。\n";
-    } else {
-        prompt += "请将以下字幕翻译为" + DstLang + "。\n";
+    // 提取动态上下文
+    string dynamic_context = "";
+    int qSize = HistoryQueue.size();
+    if (qSize > 0) {
+        for (int i = 0; i < qSize; i++) {
+            dynamic_context += "- " + HistoryQueue[i] + "\n"; 
+        }
     }
 
-    // 核心规则（字幕安全区）
+    // 构建提示词
+    string prompt = "你是一个专业字幕翻译引擎，只负责精准翻译影视字幕文本。\n";
+    prompt += "请将最下方的【待翻译当前字幕】" + sourceLangText + "翻译为" + DstLang + "。\n";
+    
+    // 核心规则
     prompt += "严格遵守以下规则：\n";
-    prompt += "1. 仅输出翻译后的文本，不要包含任何解释、前言、注释或说明。\n";
+    prompt += "1. 仅输出当前字幕的翻译结果，不要包含任何解释、前言、注释或说明。\n";
     prompt += "2. 不要合并、拆分或重排文本行，保持原有行数与顺序不变。\n";
-    prompt += "3. 保持原有的换行、标点和格式，适合字幕阅读。\n";
-    prompt += "4. 不要补充原文中没有的信息，不要润色或改写语义。\n";
-    prompt += "5. 专有名词、人名、数字、符号如无必要请保持不变。\n";
+    prompt += "3. 保持原有的换行、标点和格式，符合字幕阅读习惯。\n";
+    prompt += "4. 专有名词、人名、数字、符号如无必要请保持不变。\n";
 
-    // 上下文：仅用于理解，不得改写
-    if (!context.empty()) {
-        prompt += "以下内容仅作为理解语境参考，不要将其翻译或合并进结果：\n";
-        prompt += "'''\n" + context + "\n'''\n";
+    // 上下文隔离保护
+    if (!dynamic_context.empty()) {
+        prompt += "5. 严禁翻译【近期历史台词】部分的内容！它仅供你参考当前语境。\n\n";
+        prompt += "【近期历史台词（仅供理解语境，切勿翻译）】:\n";
+        prompt += "'''\n" + dynamic_context + "'''\n\n";
+    } else {
+        prompt += "\n";
     }
 
-    // 待翻译文本（明确边界）
-    prompt += "待翻译字幕文本：\n";
+    // 待翻译文本
+    prompt += "【待翻译当前字幕】:\n";
     prompt += "'''\n" + Text + "\n'''";
-    // ----------------------------------------
-
-    // JSON 转义
+    
     string escapedPrompt = JsonEscape(prompt);
-    // 构建请求数据
-    string requestData = "{\"model\":\"" + selected_model + "\",\"messages\":[{\"role\":\"user\",\"content\":\"" + escapedPrompt + "\"}],\"stream\":false}";
+    string requestData = "{\"model\":\"" + selected_model + "\"," +
+                         "\"messages\":[{\"role\":\"user\",\"content\":\"" + escapedPrompt + "\"}]," +
+                         "\"options\":{\"temperature\":" + selected_temperature + "}," +
+                         "\"stream\":false," +
+                         "\"think\":false}"; 
     string headers = "Content-Type: application/json";
-
-    // 发送请求
-    string response = HostUrlGetString(api_url, UserAgent, headers, requestData);
+    string response = HostUrlGetString(api_url_chat, UserAgent, headers, requestData);
     if (response.empty()) {
-        HostPrintUTF8("{$CP936=翻译请求失败。}{$CP0=Translation request failed.$}\n");
-        return "";
+        return "翻译请求失败";
     }
 
-    // 解析响应
     JsonReader Reader;
     JsonValue Root;
     if (!Reader.parse(response, Root)) {
-        HostPrintUTF8("{$CP936=无法解析 API 响应。}{$CP0=Failed to parse API response.$}\n");
-        return "";
+        return "无法解析 API 响应";
     }
 
-    JsonValue choices = Root["choices"];
-    if (choices.isArray() && choices.size() > 0 && choices[0]["message"]["content"].isString()) {
-        string translatedText = choices[0]["message"]["content"].asString();
-        // 简单清理可能残留的引号或空白
+    JsonValue messageNode = Root["message"];
+    if (messageNode.isObject() && messageNode["content"].isString()) {
+        string translatedText = messageNode["content"].asString();
         translatedText = translatedText.Trim(); 
+        
+        // 更新历史上下文队列
+        HistoryQueue.insertLast(Text); 
+        if (HistoryQueue.size() > MAX_HISTORY_LINES) {
+            HistoryQueue.removeAt(0); 
+        }
         
         if (DstLang == "fa" || DstLang == "ar" || DstLang == "he") {
             translatedText = UNICODE_RLE + translatedText;
@@ -206,35 +204,27 @@ string Translate(string Text, string &in SrcLang, string &in DstLang) {
         return translatedText;
     }
 
-    HostPrintUTF8("{$CP936=翻译失败。}{$CP0=Translation failed.$}\n");
-    return "";
+    return "翻译失败";
 }
 
 // 插件初始化
 void OnInitialize() {
-    HostPrintUTF8("{$CP936=ollama 翻译插件已加载。}{$CP0=ollama translation plugin loaded.$}\n");
-    
     api_key = HostLoadString("api_key_ollama", "");
     selected_model = HostLoadString("selected_model_ollama", DEFAULT_MODEL_NAME);
-    
-    if (!api_key.empty()) {
-        HostPrintUTF8("{$CP936=已加载保存的配置。}{$CP0=Saved API Key and model name loaded.$}\n");
-    }
 }
 
 // 插件结束
 void OnFinalize() {
-    HostPrintUTF8("{$CP936=ollama 翻译插件已卸载。}{$CP0=ollama translation plugin unloaded.$}\n");
+    HistoryQueue.resize(0);
 }
 
+// 支持的模型列表
 array<string> GetOllamaModelNames(){
-    string url = api_url_base + "/api/tags";
     string headers = "Content-Type: application/json";
-    string resp = HostUrlGetString(url,UserAgent, headers, "");
+    string resp = HostUrlGetString(api_url_tags, UserAgent, headers, "");
     JsonReader reader;
     JsonValue root;
     if (!reader.parse(resp, root)){
-        HostPrintUTF8("{$CP0=Failed to parse the list of the deployed models from Ollama.$}{$CP936=解析Ollama本地模型列表失败：无法解析JSON。}");
         array<string> empty;
         return empty;
     }

@@ -36,6 +36,7 @@ string GetPasswordText() {
 string DEFAULT_MODEL_NAME = "huihui_ai/hy-mt1.5-abliterated:latest"; 
 string api_key = "";
 string selected_model = DEFAULT_MODEL_NAME; 
+string selected_temperature = "0.0";
 string UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)";
 string api_url_base = "http://127.0.0.1:11434";
 string api_url_chat = api_url_base + "/api/chat"; 
@@ -79,7 +80,6 @@ string ServerLogin(string User, string Pass) {
     array<string> names = GetOllamaModelNames();
 
     if (selected_model.empty()) {
-        HostPrintUTF8("{$CP936=未输入模型名称，使用默认模型。}{$CP0=Model name not entered, using default.$}\n");
         selected_model = DEFAULT_MODEL_NAME;
     }
 
@@ -95,13 +95,11 @@ string ServerLogin(string User, string Pass) {
         }
     }
     if (!matched){
-        HostPrintUTF8("{$CP936=本地Ollama未找到该模型，请检查拼写。}{$CP0=Model not found in local Ollama.$}\n");
-        return "本地Ollama未找到模型：" + selected_model;
+        return "本地Ollama未找到模型: " + selected_model;
     }
 
     HostSaveString("api_key_ollama_jp", api_key);
     HostSaveString("selected_model_ollama_jp", selected_model);
-    HostPrintUTF8("{$CP936=配置已保存。}{$CP0=Configuration saved.$}\n");
     return "200 ok";
 }
 
@@ -111,7 +109,6 @@ void ServerLogout() {
     selected_model = DEFAULT_MODEL_NAME;
     HostSaveString("api_key_ollama_jp", "");
     HostSaveString("selected_model_ollama_jp", selected_model);
-    HostPrintUTF8("{$CP936=已退出。}{$CP0=Logged out.$}\n");
 }
 
 // JSON 转义
@@ -128,10 +125,12 @@ string JsonEscape(const string &in input) {
 // 翻译函数
 string Translate(string Text, string &in SrcLang, string &in DstLang) {
     selected_model = HostLoadString("selected_model_ollama_jp", DEFAULT_MODEL_NAME);
-    if (DstLang.empty() || DstLang == "{$CP936=自动检测}{$CP0=Auto Detect$}") {
-        HostPrintUTF8("{$CP936=目标语言未指定。}{$CP0=Target language not specified.$}\n");
-        return "";
+    if (DstLang.empty() || DstLang == "Auto") {
+        return "目标语言需明确指定";
     }
+
+    string UNICODE_RLE = "\u202B";
+    SrcLang = "ja";
 
     // 动态构建上下文
     string dynamic_context = "";
@@ -142,17 +141,18 @@ string Translate(string Text, string &in SrcLang, string &in DstLang) {
         }
     }
 
-    // 构建日剧专用提示词
-    string prompt;
-    prompt = "你是一个日语字幕翻译引擎，专门将日语影视字幕翻译为自然、克制的中文。\n";
-    prompt += "请将最下方的【待翻译当前字幕】翻译为中文。\n";
+    // 构建提示词
+    string prompt = "你是一个专业日语字幕翻译引擎，负责精准翻译日语影视字幕文本。\n";
+    prompt += "请将最下方的【待翻译当前日语字幕】翻译为" + DstLang + "。\n";
+
+    // 核心规则
     prompt += "严格遵守以下规则：\n";
     prompt += "1. 仅输出当前字幕的翻译结果，不要包含任何解释、前言、注释或说明。\n";
     prompt += "2. 不要合并、拆分或重排字幕行，保持原有行数、顺序和换行不变。\n";
     prompt += "3. 不要擅自补充主语（如“我 / 你 / 他 / 她”），除非日语原文明确出现。\n";
     prompt += "4. 保留原句的暧昧性和未说完的感觉，不要把含糊表达翻译得过于确定。\n";
-    prompt += "5. 正确体现语气词和情绪（如：さ、ね、よ、ぞ、か），用中文语气而非直译。\n";
-    prompt += "6. 敬语请翻译为克制、礼貌的中文，而不是书面或官腔表达。\n";
+    prompt += "5. 正确体现语气词和情绪（如：さ、ね、よ、ぞ、か），用" + DstLang + "语气而非直译。\n";
+    prompt += "6. 敬语请翻译为克制、礼貌的" + DstLang + "，而不是书面或官腔表达。\n";
     prompt += "7. 语言风格以自然口语为主，符合日剧对白节奏，避免书面语。\n";
 
     // 加入上下文隔离限制
@@ -165,25 +165,25 @@ string Translate(string Text, string &in SrcLang, string &in DstLang) {
     }
 
     // 待翻译文本
-    prompt += "【待翻译当前字幕】:\n";
+    prompt += "【待翻译当前日语字幕】:\n";
     prompt += "'''\n" + Text + "\n'''";
 
     string escapedPrompt = JsonEscape(prompt);
     string requestData = "{\"model\":\"" + selected_model + "\"," +
                          "\"messages\":[{\"role\":\"user\",\"content\":\"" + escapedPrompt + "\"}]," +
-                         "\"options\":{\"temperature\":0.0}," +
+                         "\"options\":{\"temperature\":" + selected_temperature + "}," +
                          "\"stream\":false," +
                          "\"think\":false}";
     string headers = "Content-Type: application/json";
     string response = HostUrlGetString(api_url_chat, UserAgent, headers, requestData);
     if (response.empty()) {
-        return "";
+        return "翻译请求失败";
     }
 
     JsonReader Reader;
     JsonValue Root;
     if (!Reader.parse(response, Root)) {
-        return "";
+        return "无法解析 API 响应";
     }
 
     JsonValue messageNode = Root["message"];
@@ -197,17 +197,19 @@ string Translate(string Text, string &in SrcLang, string &in DstLang) {
             HistoryQueue.removeAt(0);
         }
         
+        if (DstLang == "fa" || DstLang == "ar" || DstLang == "he") {
+            translatedText = UNICODE_RLE + translatedText;
+        }
         SrcLang = "UTF8";
         DstLang = "UTF8";
         return translatedText;
     }
 
-    return "";
+    return "翻译失败";
 }
 
 // 初始化
 void OnInitialize() {
-    HostPrintUTF8("{$CP936=Ollama 日语插件已加载。}{$CP0=Ollama JP plugin loaded.$}\n");
     api_key = HostLoadString("api_key_ollama_jp", "");
     selected_model = HostLoadString("selected_model_ollama_jp", DEFAULT_MODEL_NAME);
 }
@@ -215,7 +217,6 @@ void OnInitialize() {
 // 结束
 void OnFinalize() {
     HistoryQueue.resize(0);
-    HostPrintUTF8("{$CP936=Ollama 日语插件已卸载。}{$CP0=Ollama JP plugin unloaded.$}\n");
 }
 
 // 支持的模型列表
