@@ -4,7 +4,7 @@
 
 // 插件信息函数
 string GetTitle() {
-    return "Local AI Translation";
+    return "Ollama translation";
 }
 
 string GetVersion() {
