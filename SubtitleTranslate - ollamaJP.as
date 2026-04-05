@@ -1,47 +1,50 @@
 /*
     Real-time subtitle translation for PotPlayer using ollama API
-    [Japanese Special Edition] - Optimized for J-Drama/Anime nuances
-    Model: huihui_ai/hy-mt1.5-abliterated (Recommended)
+    [Japanese Special Edition] - Optimized for J-Dramas/Anime nuances
 */
 
 // 插件信息函数
 string GetTitle() {
-    return "{$CP936=本地 AI 翻译 (日语进阶版)}{$CP0=Local AI Translation (Japanese Special)$}";
+    return "Ollama translation(JP)";
 }
 
 string GetVersion() {
-    return "1.0_JP";
+    return "1.1_JP";
 }
 
 string GetDesc() {
-    return "{$CP936=专门针对日剧/动画优化的本地 AI 字幕翻译}{$CP0=Local AI translation optimized for Japanese Drama/Anime$}";
+    return "Local AI translation optimized for Japanese";
 }
 
 string GetLoginTitle() {
-    return "{$CP936=本地 AI 模型配置}{$CP0=Local AI Model Configuration$}";
+    return "Local AI Model Configuration";
 }
 
 string GetLoginDesc() {
-    // 依然推荐 hy-mt1.5，或者专门的日语模型如 sakura
-    return "{$CP936=请输入模型名称（推荐 huihui_ai/hy-mt1.5-abliterated:latest 或 sakura-13b）。}{$CP0=Please enter the model name (e.g., huihui_ai/hy-mt1.5-abliterated:latest).$}";
+    return "Please enter the model name and api key.";
 }
 
 string GetUserText() {
-    return "{$CP936=模型名称 (当前: " + selected_model + ")}{$CP0=Model Name (Current: " + selected_model + ")$}";
+    return "Model Name: " + selected_model;
 }
 
 string GetPasswordText() {
-    return "{$CP936=API 密钥:}{$CP0=API Key:$}";
+    return "API Key: " + api_key;
 }
 
 // 全局变量
 string DEFAULT_MODEL_NAME = "huihui_ai/hy-mt1.5-abliterated:latest"; 
 string api_key = "";
 string selected_model = DEFAULT_MODEL_NAME; 
+string selected_temperature = "0.0";
 string UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)";
-string api_url = "http://127.0.0.1:11434/v1/chat/completions";
 string api_url_base = "http://127.0.0.1:11434";
-string context = "";
+string api_url_chat = api_url_base + "/api/chat"; 
+string api_url_tags = api_url_base + "/api/tags";
+
+// 上下文滑动窗口配置，保留最近 5 句台词作为上下文
+array<string> HistoryQueue;
+int MAX_HISTORY_LINES = 5; // 
 
 // 支持的语言列表
 array<string> LangTable = 
@@ -77,7 +80,6 @@ string ServerLogin(string User, string Pass) {
     array<string> names = GetOllamaModelNames();
 
     if (selected_model.empty()) {
-        HostPrintUTF8("{$CP936=未输入模型名称，使用默认模型。}{$CP0=Model name not entered, using default.$}\n");
         selected_model = DEFAULT_MODEL_NAME;
     }
 
@@ -93,13 +95,11 @@ string ServerLogin(string User, string Pass) {
         }
     }
     if (!matched){
-        HostPrintUTF8("{$CP936=本地Ollama未找到该模型，请检查拼写。}{$CP0=Model not found in local Ollama.$}\n");
-        return "本地Ollama未找到模型：" + selected_model;
+        return "本地Ollama未找到模型: " + selected_model;
     }
 
-    HostSaveString("api_key_ollama_jp", api_key); // 使用不同的存储键，避免冲突
+    HostSaveString("api_key_ollama_jp", api_key);
     HostSaveString("selected_model_ollama_jp", selected_model);
-    HostPrintUTF8("{$CP936=配置已保存。}{$CP0=Configuration saved.$}\n");
     return "200 ok";
 }
 
@@ -109,7 +109,6 @@ void ServerLogout() {
     selected_model = DEFAULT_MODEL_NAME;
     HostSaveString("api_key_ollama_jp", "");
     HostSaveString("selected_model_ollama_jp", selected_model);
-    HostPrintUTF8("{$CP936=已退出。}{$CP0=Logged out.$}\n");
 }
 
 // JSON 转义
@@ -123,91 +122,107 @@ string JsonEscape(const string &in input) {
     return output;
 }
 
-// 翻译函数 (核心修改部分)
+// 翻译函数
 string Translate(string Text, string &in SrcLang, string &in DstLang) {
     selected_model = HostLoadString("selected_model_ollama_jp", DEFAULT_MODEL_NAME);
-
-    // 无论 SrcLang 是什么，我们都假设它是日语，或者由提示词强制处理
-    // 但如果 DstLang 没指定，还是需要检查一下
-    if (DstLang.empty() || DstLang == "{$CP936=自动检测}{$CP0=Auto Detect$}") {
-        HostPrintUTF8("{$CP936=目标语言未指定。}{$CP0=Target language not specified.$}\n");
-        return "";
+    if (DstLang.empty() || DstLang == "Auto") {
+        return "目标语言需明确指定";
     }
 
-    // --- 构建日剧专用提示词 ---
-    string prompt;
+    string UNICODE_RLE = "\u202B";
+    SrcLang = "ja";
 
-    // 1. 强制模型角色
-    prompt = "你是一个日语字幕翻译引擎，专门将日语影视字幕翻译为自然、克制的中文。\n";
+    // 动态构建上下文
+    string dynamic_context = "";
+    int qSize = HistoryQueue.size();
+    if (qSize > 0) {
+        for (int i = 0; i < qSize; i++) {
+            dynamic_context += "- " + HistoryQueue[i] + "\n"; 
+        }
+    }
 
-    // 2. 任务指令 (忽略 SrcLang 变量，强制按日语处理)
-    prompt += "请将以下日语字幕翻译为中文。\n";
+    // 构建提示词
+    string prompt = "你是一个专业日语字幕翻译引擎，负责精准翻译日语影视字幕文本。\n";
+    prompt += "请将最下方的【待翻译当前日语字幕】翻译为" + DstLang + "。\n";
 
-    // 3. 日语字幕核心规则 (用户定制版)
+    // 核心规则
     prompt += "严格遵守以下规则：\n";
-    prompt += "1. 仅输出翻译后的中文，不要包含任何解释、前言、注释或说明。\n";
+    prompt += "1. 仅输出当前字幕的翻译结果，不要包含任何解释、前言、注释或说明。\n";
     prompt += "2. 不要合并、拆分或重排字幕行，保持原有行数、顺序和换行不变。\n";
     prompt += "3. 不要擅自补充主语（如“我 / 你 / 他 / 她”），除非日语原文明确出现。\n";
     prompt += "4. 保留原句的暧昧性和未说完的感觉，不要把含糊表达翻译得过于确定。\n";
-    prompt += "5. 正确体现语气词和情绪（如：さ、ね、よ、ぞ、か），用中文语气而非直译。\n";
-    prompt += "6. 敬语请翻译为克制、礼貌的中文，而不是书面或官腔表达。\n";
+    prompt += "5. 正确体现语气词和情绪（如：さ、ね、よ、ぞ、か），用" + DstLang + "语气而非直译。\n";
+    prompt += "6. 敬语请翻译为克制、礼貌的" + DstLang + "，而不是书面或官腔表达。\n";
     prompt += "7. 语言风格以自然口语为主，符合日剧对白节奏，避免书面语。\n";
 
-    // 4. 上下文
-    if (!context.empty()) {
-        prompt += "以下内容仅用于理解剧情背景，不要翻译或合并进结果：\n";
-        prompt += "'''\n" + context + "\n'''\n";
+    // 加入上下文隔离限制
+    if (!dynamic_context.empty()) {
+        prompt += "8. 严禁翻译【近期历史台词】部分的内容！它仅供你参考语境（如代词指代、前言后语）。\n\n";
+        prompt += "【近期历史台词（仅供理解语境，切勿翻译）】:\n";
+        prompt += "'''\n" + dynamic_context + "'''\n\n";
+    } else {
+        prompt += "\n";
     }
 
-    // 5. 待翻译文本
-    prompt += "待翻译日语字幕：\n";
+    // 待翻译文本
+    prompt += "【待翻译当前日语字幕】:\n";
     prompt += "'''\n" + Text + "\n'''";
-    // -------------------------
 
     string escapedPrompt = JsonEscape(prompt);
-    string requestData = "{\"model\":\"" + selected_model + "\",\"messages\":[{\"role\":\"user\",\"content\":\"" + escapedPrompt + "\"}],\"stream\":false}";
+    string requestData = "{\"model\":\"" + selected_model + "\"," +
+                         "\"messages\":[{\"role\":\"user\",\"content\":\"" + escapedPrompt + "\"}]," +
+                         "\"options\":{\"temperature\":" + selected_temperature + "}," +
+                         "\"stream\":false," +
+                         "\"think\":false}";
     string headers = "Content-Type: application/json";
-
-    string response = HostUrlGetString(api_url, UserAgent, headers, requestData);
+    string response = HostUrlGetString(api_url_chat, UserAgent, headers, requestData);
     if (response.empty()) {
-        return "";
+        return "翻译请求失败";
     }
 
     JsonReader Reader;
     JsonValue Root;
     if (!Reader.parse(response, Root)) {
-        return "";
+        return "无法解析 API 响应";
     }
 
-    JsonValue choices = Root["choices"];
-    if (choices.isArray() && choices.size() > 0 && choices[0]["message"]["content"].isString()) {
-        string translatedText = choices[0]["message"]["content"].asString();
+    JsonValue messageNode = Root["message"];
+    if (messageNode.isObject() && messageNode["content"].isString()) {
+        string translatedText = messageNode["content"].asString();
         translatedText = translatedText.Trim(); 
+
+        // 上下文队列更新逻辑
+        HistoryQueue.insertLast(Text);
+        if (HistoryQueue.size() > MAX_HISTORY_LINES) {
+            HistoryQueue.removeAt(0);
+        }
         
+        if (DstLang == "fa" || DstLang == "ar" || DstLang == "he") {
+            translatedText = UNICODE_RLE + translatedText;
+        }
         SrcLang = "UTF8";
         DstLang = "UTF8";
         return translatedText;
     }
 
-    return "";
+    return "翻译失败";
 }
 
 // 初始化
 void OnInitialize() {
-    HostPrintUTF8("{$CP936=Ollama 日语进阶版插件已加载。}{$CP0=Ollama JP plugin loaded.$}\n");
     api_key = HostLoadString("api_key_ollama_jp", "");
     selected_model = HostLoadString("selected_model_ollama_jp", DEFAULT_MODEL_NAME);
 }
 
 // 结束
 void OnFinalize() {
-    HostPrintUTF8("{$CP936=Ollama 日语进阶版插件已卸载。}{$CP0=Ollama JP plugin unloaded.$}\n");
+    HistoryQueue.resize(0);
 }
 
+// 支持的模型列表
 array<string> GetOllamaModelNames(){
-    string url = api_url_base + "/api/tags";
     string headers = "Content-Type: application/json";
-    string resp = HostUrlGetString(url,UserAgent, headers, "");
+    string resp = HostUrlGetString(api_url_tags, UserAgent, headers, "");
     JsonReader reader;
     JsonValue root;
     if (!reader.parse(resp, root)){
